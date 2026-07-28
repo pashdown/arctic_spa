@@ -11,17 +11,19 @@ This is the **1.x** release, for spas on the older **BlueFalls/Yoctub** protocol
 12121.
 
 Around firmware 3.1.x, Arctic Spas dropped this protocol and switched to a JSON
-WebSocket API on port 8765. **If your spa is on firmware 3.x, do not use this
-branch** - use the `main` branch (2.x release) instead, which speaks the newer
-API.
+WebSocket API on port 8765. **If your spa is on firmware 3.x, this repository
+will not work for you** - use the upstream
+[riversen/arctic_spa](https://github.com/riversen/arctic_spa) integration
+instead, which speaks the newer API. This repository exists solely to keep the
+1.x line alive for older spas.
 
-| Spa firmware | Protocol                          | Use            |
-| ------------ | --------------------------------- | -------------- |
-| 1.x / 2.x    | BlueFalls/Yoctub (UDP + protobuf) | this `1.x` branch |
-| 3.x+         | JSON WebSocket (port 8765)        | `main` branch  |
+| Spa firmware | Protocol                          | Use                                                    |
+| ------------ | --------------------------------- | ------------------------------------------------------ |
+| 1.x / 2.x    | BlueFalls/Yoctub (UDP + protobuf) | this repository                                        |
+| 3.x+         | JSON WebSocket (port 8765)        | [riversen/arctic_spa](https://github.com/riversen/arctic_spa) |
 
-In HACS, install this version by selecting the `1.x` branch or the latest
-1.x tag (`v1.1.0`).
+In HACS, install by adding this repository and choosing the latest release
+(`v1.1.0`).
 
 ## Features
 
