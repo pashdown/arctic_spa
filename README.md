@@ -123,4 +123,9 @@ MIT License
 
 ## Credits
 
+Originally created by Roy Iversen ([@riversen](https://github.com/riversen)).
+This is a standalone continuation of that work, preserving the 1.x
+BlueFalls/Yoctub support that was superseded upstream by the firmware 3.x
+rewrite. Original repository: https://github.com/riversen/arctic_spa
+
 Protocol reverse-engineered from the Arctic Spas Android app.
