@@ -72,6 +72,15 @@ class ArcticSpaBaseSensor(CoordinatorEntity[ArcticSpaCoordinator], SensorEntity)
             "model": "Hot Tub",
         }
 
+    @property
+    def available(self) -> bool:
+        """Reflects live spa state, so it's unavailable once the link drops."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.spa_available
+        )
+
 
 class ArcticSpaTemperatureSensor(ArcticSpaBaseSensor):
     """Temperature sensor for Arctic Spa."""

@@ -35,9 +35,19 @@ class ArcticSpaCoordinator(DataUpdateCoordinator[SpaStatus]):
             update_interval=timedelta(seconds=FALLBACK_SCAN_INTERVAL),
         )
         self.client = client
-        
+
         # Register callback for push updates from spa
         self.client.register_state_callback(self._on_state_change)
+
+    @property
+    def spa_available(self) -> bool:
+        """Whether entities should show data, tolerating brief reconnects.
+
+        Entities use this rather than status.connected so a few seconds of
+        reconnect doesn't blank the whole dashboard. The "Connected" binary
+        sensor deliberately reports the raw link state instead.
+        """
+        return self.client.available
 
     @callback
     def _on_state_change(self) -> None:

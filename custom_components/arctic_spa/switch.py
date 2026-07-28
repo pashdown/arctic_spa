@@ -62,6 +62,15 @@ class ArcticSpaBaseSwitch(CoordinatorEntity[ArcticSpaCoordinator], SwitchEntity)
             "model": "Hot Tub",
         }
 
+    @property
+    def available(self) -> bool:
+        """You can't control a spa you're not connected to."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.spa_available
+        )
+
 
 class ArcticSpaLightsSwitch(ArcticSpaBaseSwitch):
     """Lights switch for Arctic Spa."""

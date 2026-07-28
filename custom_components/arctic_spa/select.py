@@ -64,6 +64,15 @@ class ArcticSpaPump1Select(CoordinatorEntity[ArcticSpaCoordinator], SelectEntity
         }
 
     @property
+    def available(self) -> bool:
+        """You can't control a spa you're not connected to."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.spa_available
+        )
+
+    @property
     def current_option(self) -> str | None:
         """Return the current pump status."""
         if self.coordinator.data:

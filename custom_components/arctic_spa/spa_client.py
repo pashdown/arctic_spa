@@ -5,6 +5,7 @@ import asyncio
 import logging
 import socket
 import struct
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -28,12 +29,14 @@ _LOGGER = logging.getLogger(__name__)
 
 # Keepalive interval in seconds
 KEEPALIVE_INTERVAL = 30
-# Reconnect delay in seconds
-RECONNECT_DELAY = 5
 # Connection timeout
 CONNECT_TIMEOUT = 10
-# Max reconnect attempts before giving up temporarily
-MAX_RECONNECT_ATTEMPTS = 3
+# Exponential backoff between reconnect attempts (seconds); the last value
+# repeats so a spa that is powered off doesn't get hammered.
+RECONNECT_DELAYS = (5, 10, 30, 60, 120)
+# Short drops happen, especially over wifi. Ride through a quick reconnect and
+# only report entities unavailable once the link has stayed down this long.
+AVAILABILITY_GRACE = 90.0
 
 
 @dataclass
@@ -207,7 +210,8 @@ class ArcticSpaClient:
         self._listener_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._running = False
-        self._reconnect_attempts = 0
+        self._reconnect_attempt = 0
+        self._disconnected_since: float | None = None
         self._state_callbacks: list[Callable[[], None]] = []
 
     @property
@@ -219,6 +223,28 @@ class ArcticSpaClient:
     def connected(self) -> bool:
         """Check if connected."""
         return self._status.connected and self._writer is not None
+
+    @property
+    def available(self) -> bool:
+        """Whether entities should still show data.
+
+        Deliberately more forgiving than `connected`. A reconnect takes a few
+        seconds, and blanking every entity for that long each time is worse
+        than briefly showing the last known reading. Only report unavailable
+        once the link has been down for AVAILABILITY_GRACE seconds.
+        """
+        if self._status.connected:
+            return True
+        if self._status.last_update is None or self._disconnected_since is None:
+            # Never had a reading, so there is nothing worth holding on to.
+            return False
+        return (time.monotonic() - self._disconnected_since) < AVAILABILITY_GRACE
+
+    def _mark_disconnected(self) -> None:
+        """Record the moment the link went down, for the availability grace."""
+        if self._status.connected or self._disconnected_since is None:
+            self._disconnected_since = time.monotonic()
+        self._status.connected = False
 
     def register_state_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback for state changes."""
@@ -290,14 +316,15 @@ class ArcticSpaClient:
             return True
         
         self._running = True
-        self._reconnect_attempts = 0
-        
+        self._reconnect_attempt = 0
+
         success = await self._connect()
-        if success:
-            # Start background tasks
-            self._listener_task = asyncio.create_task(self._listener_loop())
-            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-        
+        # Start the supervisor unconditionally so a spa that is asleep or
+        # briefly unreachable at startup still gets retried with backoff,
+        # rather than the integration coming up permanently dead.
+        self._listener_task = asyncio.create_task(self._supervise())
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
         return success
 
     async def async_stop(self) -> None:
@@ -339,9 +366,10 @@ class ArcticSpaClient:
                 )
                 
                 self._status.connected = True
-                self._reconnect_attempts = 0
+                self._disconnected_since = None
+                self._reconnect_attempt = 0
                 _LOGGER.info("Connected to spa")
-                
+
                 # Send initial requests to get state
                 await self._send_packet(MsgType.INFO)
                 await asyncio.sleep(0.1)
@@ -350,12 +378,13 @@ class ArcticSpaClient:
                 await self._send_packet(MsgType.CONFIG)
                 await asyncio.sleep(0.1)
                 await self._send_packet(MsgType.ONZEN_LIVE)  # Request SpaBoy data
-                
+
+                self._notify_state_change()
                 return True
-                
+
             except Exception as err:
                 _LOGGER.error("Failed to connect to spa: %s", err)
-                self._status.connected = False
+                self._mark_disconnected()
                 self._reader = None
                 self._writer = None
                 return False
@@ -371,92 +400,97 @@ class ArcticSpaClient:
                     pass
             self._reader = None
             self._writer = None
-            self._status.connected = False
+            self._mark_disconnected()
             _LOGGER.info("Disconnected from spa")
 
-    async def _reconnect(self) -> bool:
-        """Attempt to reconnect to spa."""
-        if not self._running:
-            return False
-        
-        self._reconnect_attempts += 1
-        
-        if self._reconnect_attempts > MAX_RECONNECT_ATTEMPTS:
-            _LOGGER.warning(
-                "Max reconnect attempts (%d) reached, waiting longer",
-                MAX_RECONNECT_ATTEMPTS
-            )
-            await asyncio.sleep(RECONNECT_DELAY * 3)
-            self._reconnect_attempts = 0
-        
-        _LOGGER.info("Attempting reconnect (attempt %d)", self._reconnect_attempts)
-        await self._disconnect()
-        await asyncio.sleep(RECONNECT_DELAY)
-        
-        return await self._connect()
+    async def _backoff_sleep(self) -> None:
+        """Wait before the next reconnect attempt, with exponential backoff."""
+        delay = RECONNECT_DELAYS[min(self._reconnect_attempt, len(RECONNECT_DELAYS) - 1)]
+        self._reconnect_attempt += 1
+        _LOGGER.info("Reconnecting to spa in %ds (attempt %d)", delay, self._reconnect_attempt)
+        await asyncio.sleep(delay)
 
-    async def _listener_loop(self) -> None:
-        """Background task that listens for incoming data."""
-        buffer = b''
-        
+    async def _supervise(self) -> None:
+        """Listen and auto-reconnect with exponential backoff.
+
+        Owns the connection lifecycle: (re)connects when the link is down,
+        runs the receive loop while it is up, and on any drop marks the client
+        disconnected, notifies entities, and backs off before retrying.
+        """
         while self._running:
+            if not self._status.connected or self._reader is None:
+                if not await self._connect():
+                    await self._backoff_sleep()
+                    # Re-evaluate entities; they drop out once the grace expires.
+                    self._notify_state_change()
+                    continue
+
             try:
-                if not self._reader or not self._status.connected:
-                    await asyncio.sleep(1)
-                    continue
-                
-                # Read data with timeout
-                try:
-                    data = await asyncio.wait_for(
-                        self._reader.read(4096),
-                        timeout=KEEPALIVE_INTERVAL + 10
-                    )
-                except asyncio.TimeoutError:
-                    _LOGGER.warning("Read timeout, checking connection")
-                    continue
-                
-                if not data:
-                    _LOGGER.warning("Connection closed by spa")
-                    self._status.connected = False
-                    await self._reconnect()
-                    continue
-                
-                buffer += data
-                
-                # Parse packets from buffer
-                while len(buffer) >= HEADER_SIZE:
-                    # Find magic
-                    if buffer[:4] != struct.pack('>I', MAGIC):
-                        idx = buffer.find(struct.pack('>I', MAGIC))
-                        if idx > 0:
-                            buffer = buffer[idx:]
-                        else:
-                            buffer = b''
-                            break
-                        continue
-                    
-                    # Parse header
-                    _, _, _, _, pkt_type, size = struct.unpack(
-                        '>IIIIHH', buffer[:HEADER_SIZE]
-                    )
-                    
-                    # Check if we have full packet
-                    if len(buffer) < HEADER_SIZE + size:
-                        break
-                    
-                    # Extract payload
-                    payload = buffer[HEADER_SIZE:HEADER_SIZE + size]
-                    buffer = buffer[HEADER_SIZE + size:]
-                    
-                    # Process packet
-                    await self._process_packet(pkt_type, payload)
-                    
+                await self._receive_loop()
             except asyncio.CancelledError:
                 break
             except Exception as err:
                 _LOGGER.error("Error in listener loop: %s", err)
-                if self._running:
-                    await self._reconnect()
+
+            # Link dropped. Entities keep their last reading until the grace
+            # period in `available` runs out, so a quick reconnect is invisible.
+            self._mark_disconnected()
+            self._notify_state_change()
+            await self._disconnect()
+            if self._running:
+                await self._backoff_sleep()
+                # Notify again after the wait so entities re-evaluate; this is
+                # what actually flips them unavailable once the grace expires.
+                self._notify_state_change()
+
+    async def _receive_loop(self) -> None:
+        """Read and parse packets until the link drops."""
+        buffer = b''
+
+        while self._running and self._status.connected and self._reader is not None:
+            # Read data with timeout
+            try:
+                data = await asyncio.wait_for(
+                    self._reader.read(4096),
+                    timeout=KEEPALIVE_INTERVAL + 10
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Read timeout, checking connection")
+                continue
+
+            if not data:
+                _LOGGER.warning("Connection closed by spa")
+                return
+
+            buffer += data
+
+            # Parse packets from buffer
+            while len(buffer) >= HEADER_SIZE:
+                # Find magic
+                if buffer[:4] != struct.pack('>I', MAGIC):
+                    idx = buffer.find(struct.pack('>I', MAGIC))
+                    if idx > 0:
+                        buffer = buffer[idx:]
+                    else:
+                        buffer = b''
+                        break
+                    continue
+
+                # Parse header
+                _, _, _, _, pkt_type, size = struct.unpack(
+                    '>IIIIHH', buffer[:HEADER_SIZE]
+                )
+
+                # Check if we have full packet
+                if len(buffer) < HEADER_SIZE + size:
+                    break
+
+                # Extract payload
+                payload = buffer[HEADER_SIZE:HEADER_SIZE + size]
+                buffer = buffer[HEADER_SIZE + size:]
+
+                # Process packet
+                await self._process_packet(pkt_type, payload)
 
     async def _keepalive_loop(self) -> None:
         """Background task that sends keepalive requests."""
@@ -646,7 +680,7 @@ class ArcticSpaClient:
             return True
         except Exception as err:
             _LOGGER.error("Error sending packet: %s", err)
-            self._status.connected = False
+            self._mark_disconnected()
             return False
 
     async def async_send_command(self, payload: bytes) -> bool:

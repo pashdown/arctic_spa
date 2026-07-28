@@ -77,6 +77,15 @@ class ArcticSpaClimate(CoordinatorEntity[ArcticSpaCoordinator], ClimateEntity):
             self._attr_target_temperature_step = 1.0  # 1°F steps
 
     @property
+    def available(self) -> bool:
+        """You can't control a spa you're not connected to."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.spa_available
+        )
+
+    @property
     def current_temperature(self) -> float | None:
         """Return the current temperature."""
         if self.coordinator.data:

@@ -62,6 +62,15 @@ class ArcticSpaBaseBinarySensor(CoordinatorEntity[ArcticSpaCoordinator], BinaryS
             "model": "Hot Tub",
         }
 
+    @property
+    def available(self) -> bool:
+        """Reflects live spa state, so it's unavailable once the link drops."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.coordinator.spa_available
+        )
+
 
 class ArcticSpaHeaterBinarySensor(ArcticSpaBaseBinarySensor):
     """Heater active binary sensor for Arctic Spa."""
@@ -105,6 +114,15 @@ class ArcticSpaConnectedSensor(ArcticSpaBaseBinarySensor):
         if self.coordinator.data:
             return self.coordinator.data.connected
         return False
+
+    @property
+    def available(self) -> bool:
+        """Stay available while the link is down.
+
+        Otherwise this sensor would read "unavailable" at exactly the moment
+        it should read "off", overriding the grace used by the other entities.
+        """
+        return self.coordinator.last_update_success and self.coordinator.data is not None
 
 
 class ArcticSpaBoostSensor(ArcticSpaBaseBinarySensor):
