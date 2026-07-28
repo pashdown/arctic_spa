@@ -20,7 +20,8 @@ API.
 | 1.x / 2.x    | BlueFalls/Yoctub (UDP + protobuf) | this `1.x` branch |
 | 3.x+         | JSON WebSocket (port 8765)        | `main` branch  |
 
-In HACS, install this version by selecting the `1.x` branch or the `v1.0.0` tag.
+In HACS, install this version by selecting the `1.x` branch or the latest
+1.x tag (`v1.1.0`).
 
 ## Features
 
@@ -30,6 +31,9 @@ In HACS, install this version by selecting the `1.x` branch or the `v1.0.0` tag.
 - **Lights**: Toggle spa lights on/off
 - **Spa Boost**: Enable/disable boost mode
 - **Onzen**: Enable/disable Onzen sanitization
+- **Resilient connection**: persistent link with automatic reconnect
+  (exponential backoff) and a grace period that rides through brief drops so
+  entities do not flap unavailable
 - **Sensors**:
   - Current water temperature
   - Target temperature
@@ -94,6 +98,24 @@ This integration uses the BlueFalls/Yoctub protocol:
 ### Commands Not Working
 - The spa requires a UDP wake-up before responding to TCP commands
 - This integration handles this automatically, but network firewalls may block UDP
+
+### Entities Briefly Unavailable
+- A dropped link is reconnected automatically with exponential backoff
+  (5/10/30/60/120s)
+- Entities hold their last reading for 90s across a reconnect, so a quick
+  blip is invisible; they report unavailable only after a genuine outage
+- The "Connected" binary sensor always reports the raw link state
+
+## Changelog
+
+### v1.1.0
+- Backported the reconnection logic from the 3.x rewrite: exponential
+  reconnect backoff, a 90s availability grace so entities no longer flap
+  unavailable on brief drops, and a supervisor loop that retries a failed
+  startup connection instead of coming up dead.
+
+### v1.0.0
+- Initial release for the BlueFalls/Yoctub protocol (firmware 1.x / 2.x).
 
 ## License
 
