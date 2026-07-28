@@ -4,6 +4,24 @@
 
 Home Assistant integration for Arctic Spas hot tubs with WiFi connectivity (2020+ models with Yoctub protocol).
 
+## Firmware support
+
+This is the **1.x** release, for spas on the older **BlueFalls/Yoctub** protocol
+(firmware 1.x / 2.x): UDP discovery on port 12122, protobuf over TCP on port
+12121.
+
+Around firmware 3.1.x, Arctic Spas dropped this protocol and switched to a JSON
+WebSocket API on port 8765. **If your spa is on firmware 3.x, do not use this
+branch** - use the `main` branch (2.x release) instead, which speaks the newer
+API.
+
+| Spa firmware | Protocol                          | Use            |
+| ------------ | --------------------------------- | -------------- |
+| 1.x / 2.x    | BlueFalls/Yoctub (UDP + protobuf) | this `1.x` branch |
+| 3.x+         | JSON WebSocket (port 8765)        | `main` branch  |
+
+In HACS, install this version by selecting the `1.x` branch or the `v1.0.0` tag.
+
 ## Features
 
 - **Climate Control**: Set and monitor water temperature (°C or °F)
