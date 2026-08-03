@@ -6,6 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, Event
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
 from .coordinator import ArcticSpaCoordinator
@@ -27,12 +28,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = entry.data[CONF_HOST]
     
     client = ArcticSpaClient(host)
-    
-    # Start persistent connection
+
+    # Start persistent connection. If the spa isn't reachable/responding on
+    # TCP 12121 yet, stop the background tasks and tell HA the entry isn't
+    # ready so it retries setup with backoff instead of failing permanently.
     if not await client.async_start():
-        _LOGGER.error("Failed to connect to Arctic Spa at %s", host)
-        return False
-    
+        await client.async_stop()
+        raise ConfigEntryNotReady(
+            f"Arctic Spa at {host}:{client.port} not responding; will retry"
+        )
+
     coordinator = ArcticSpaCoordinator(hass, client)
     
     # Do initial data fetch

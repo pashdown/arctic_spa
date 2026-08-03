@@ -212,6 +212,7 @@ class ArcticSpaClient:
         self._running = False
         self._reconnect_attempt = 0
         self._disconnected_since: float | None = None
+        self._rx_buffer = b''
         self._state_callbacks: list[Callable[[], None]] = []
 
     @property
@@ -368,6 +369,7 @@ class ArcticSpaClient:
                 self._status.connected = True
                 self._disconnected_since = None
                 self._reconnect_attempt = 0
+                self._rx_buffer = b''
                 _LOGGER.info("Connected to spa")
 
                 # Send initial requests to get state
@@ -379,14 +381,39 @@ class ArcticSpaClient:
                 await asyncio.sleep(0.1)
                 await self._send_packet(MsgType.ONZEN_LIVE)  # Request SpaBoy data
 
+                # Confirm the spa actually talks on this port. A TCP handshake
+                # can succeed against a port that then stays mute (spa asleep,
+                # wrong host, firewall). Require at least one frame before
+                # declaring the link up, so the supervisor retries instead of
+                # sitting "connected" with no data.
+                try:
+                    probe = await asyncio.wait_for(
+                        self._reader.read(4096), timeout=CONNECT_TIMEOUT
+                    )
+                except (asyncio.TimeoutError, OSError) as err:
+                    _LOGGER.warning(
+                        "No response from spa on %s:%d (%s); will retry",
+                        self.host, self.port, err,
+                    )
+                    await self._teardown_socket()
+                    return False
+                if not probe:
+                    _LOGGER.warning(
+                        "Spa closed %s:%d without responding; will retry",
+                        self.host, self.port,
+                    )
+                    await self._teardown_socket()
+                    return False
+
+                # Don't lose the probed frame - feed it to the parser.
+                await self._ingest(probe)
+
                 self._notify_state_change()
                 return True
 
             except Exception as err:
                 _LOGGER.error("Failed to connect to spa: %s", err)
-                self._mark_disconnected()
-                self._reader = None
-                self._writer = None
+                await self._teardown_socket()
                 return False
 
     async def _disconnect(self) -> None:
@@ -443,10 +470,54 @@ class ArcticSpaClient:
                 # what actually flips them unavailable once the grace expires.
                 self._notify_state_change()
 
+    async def _teardown_socket(self) -> None:
+        """Close the current socket in place. Caller must hold self._lock."""
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        self._mark_disconnected()
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _ingest(self, data: bytes) -> None:
+        """Append received bytes to the buffer and dispatch complete packets."""
+        buffer = self._rx_buffer + data
+
+        while len(buffer) >= HEADER_SIZE:
+            # Find magic
+            if buffer[:4] != struct.pack('>I', MAGIC):
+                idx = buffer.find(struct.pack('>I', MAGIC))
+                if idx > 0:
+                    buffer = buffer[idx:]
+                else:
+                    buffer = b''
+                    break
+                continue
+
+            # Parse header
+            _, _, _, _, pkt_type, size = struct.unpack(
+                '>IIIIHH', buffer[:HEADER_SIZE]
+            )
+
+            # Check if we have full packet
+            if len(buffer) < HEADER_SIZE + size:
+                break
+
+            # Extract payload
+            payload = buffer[HEADER_SIZE:HEADER_SIZE + size]
+            buffer = buffer[HEADER_SIZE + size:]
+
+            # Process packet
+            await self._process_packet(pkt_type, payload)
+
+        self._rx_buffer = buffer
+
     async def _receive_loop(self) -> None:
         """Read and parse packets until the link drops."""
-        buffer = b''
-
         while self._running and self._status.connected and self._reader is not None:
             # Read data with timeout
             try:
@@ -462,35 +533,7 @@ class ArcticSpaClient:
                 _LOGGER.warning("Connection closed by spa")
                 return
 
-            buffer += data
-
-            # Parse packets from buffer
-            while len(buffer) >= HEADER_SIZE:
-                # Find magic
-                if buffer[:4] != struct.pack('>I', MAGIC):
-                    idx = buffer.find(struct.pack('>I', MAGIC))
-                    if idx > 0:
-                        buffer = buffer[idx:]
-                    else:
-                        buffer = b''
-                        break
-                    continue
-
-                # Parse header
-                _, _, _, _, pkt_type, size = struct.unpack(
-                    '>IIIIHH', buffer[:HEADER_SIZE]
-                )
-
-                # Check if we have full packet
-                if len(buffer) < HEADER_SIZE + size:
-                    break
-
-                # Extract payload
-                payload = buffer[HEADER_SIZE:HEADER_SIZE + size]
-                buffer = buffer[HEADER_SIZE + size:]
-
-                # Process packet
-                await self._process_packet(pkt_type, payload)
+            await self._ingest(data)
 
     async def _keepalive_loop(self) -> None:
         """Background task that sends keepalive requests."""
