@@ -37,6 +37,11 @@ RECONNECT_DELAYS = (5, 10, 30, 60, 120)
 # Short drops happen, especially over wifi. Ride through a quick reconnect and
 # only report entities unavailable once the link has stayed down this long.
 AVAILABILITY_GRACE = 90.0
+# Consecutive read timeouts (each KEEPALIVE_INTERVAL + 10s) to tolerate before
+# treating the link as dead. The keepalive loop sends a LIVE request every
+# KEEPALIVE_INTERVAL seconds, so staying silent this long means the spa has
+# stopped answering, not just a slow response.
+MAX_CONSECUTIVE_READ_TIMEOUTS = 2
 
 
 @dataclass
@@ -518,6 +523,7 @@ class ArcticSpaClient:
 
     async def _receive_loop(self) -> None:
         """Read and parse packets until the link drops."""
+        consecutive_timeouts = 0
         while self._running and self._status.connected and self._reader is not None:
             # Read data with timeout
             try:
@@ -526,8 +532,18 @@ class ArcticSpaClient:
                     timeout=KEEPALIVE_INTERVAL + 10
                 )
             except asyncio.TimeoutError:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= MAX_CONSECUTIVE_READ_TIMEOUTS:
+                    _LOGGER.warning(
+                        "No response after %d consecutive read timeouts, "
+                        "treating link as dead",
+                        consecutive_timeouts,
+                    )
+                    return
                 _LOGGER.warning("Read timeout, checking connection")
                 continue
+
+            consecutive_timeouts = 0
 
             if not data:
                 _LOGGER.warning("Connection closed by spa")
