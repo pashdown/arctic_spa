@@ -22,8 +22,7 @@ instead, which speaks the newer API. This repository exists solely to keep the
 | 1.x / 2.x    | BlueFalls/Yoctub (UDP + protobuf) | this repository                                        |
 | 3.x+         | JSON WebSocket (port 8765)        | [riversen/arctic_spa](https://github.com/riversen/arctic_spa) |
 
-In HACS, install by adding this repository and choosing the latest release
-(`v1.1.0`).
+In HACS, install by adding this repository and choosing the latest release.
 
 ## Features
 
@@ -110,14 +109,7 @@ This integration uses the BlueFalls/Yoctub protocol:
 
 ## Changelog
 
-### v1.1.0
-- Backported the reconnection logic from the 3.x rewrite: exponential
-  reconnect backoff, a 90s availability grace so entities no longer flap
-  unavailable on brief drops, and a supervisor loop that retries a failed
-  startup connection instead of coming up dead.
-
-### v1.0.0
-- Initial release for the BlueFalls/Yoctub protocol (firmware 1.x / 2.x).
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
