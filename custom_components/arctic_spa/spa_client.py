@@ -416,6 +416,18 @@ class ArcticSpaClient:
                 self._notify_state_change()
                 return True
 
+            except OSError as err:
+                # Connection refused / no route to host / timed out at the
+                # socket layer - expected and non-actionable when the spa's
+                # wifi is roaming between access points. The supervisor
+                # already retries with backoff, so this doesn't warrant
+                # HA's error-level treatment (repair items, notifications).
+                _LOGGER.warning(
+                    "Could not reach spa at %s:%d (%s); will retry",
+                    self.host, self.port, err,
+                )
+                await self._teardown_socket()
+                return False
             except Exception as err:
                 _LOGGER.error("Failed to connect to spa: %s", err)
                 await self._teardown_socket()

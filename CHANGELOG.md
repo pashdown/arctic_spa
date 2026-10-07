@@ -5,6 +5,23 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.2] - 2026-10-07
+
+Lowers log severity for expected, non-actionable connection failures caused
+by the spa's wifi roaming between access points.
+
+- `_connect()`'s catch-all handler was logging `OSError`s (errno 111
+  connection refused, errno 113 no route to host - textbook AP-roam
+  symptoms) at ERROR, which HA surfaces prominently (repair items,
+  notifications) for something that isn't actionable and that the
+  supervisor already retries with backoff. These now log at WARNING with
+  "will retry" phrasing, consistent with the other transient-failure
+  messages. Genuinely unexpected exceptions still log at ERROR.
+- No behavior change to reconnect/backoff logic itself - the high log
+  volume reported after 1.2.1 (hundreds of "Read timeout" / "Failed to
+  connect" entries) was the existing reconnect loop working as designed
+  against sustained wifi instability, not a regression.
+
 ## [1.2.1] - 2026-10-02
 
 Fixes a dead-link detection bug surfaced by HA logs: "Read timeout, checking
