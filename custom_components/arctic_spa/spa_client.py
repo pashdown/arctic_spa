@@ -34,9 +34,11 @@ CONNECT_TIMEOUT = 10
 # Exponential backoff between reconnect attempts (seconds); the last value
 # repeats so a spa that is powered off doesn't get hammered.
 RECONNECT_DELAYS = (5, 10, 30, 60, 120)
-# Short drops happen, especially over wifi. Ride through a quick reconnect and
-# only report entities unavailable once the link has stayed down this long.
-AVAILABILITY_GRACE = 90.0
+# Short drops happen, especially over wifi (observed: a spa roaming between
+# access points can stay dropped for several minutes at a time). Ride through
+# a quick reconnect and only report entities unavailable once the link has
+# stayed down this long.
+AVAILABILITY_GRACE = 3 * 3600.0  # 3 hours
 # Consecutive read timeouts (each KEEPALIVE_INTERVAL + 10s) to tolerate before
 # treating the link as dead. The keepalive loop sends a LIVE request every
 # KEEPALIVE_INTERVAL seconds, so staying silent this long means the spa has

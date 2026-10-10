@@ -103,8 +103,10 @@ This integration uses the BlueFalls/Yoctub protocol:
 ### Entities Briefly Unavailable
 - A dropped link is reconnected automatically with exponential backoff
   (5/10/30/60/120s)
-- Entities hold their last reading for 90s across a reconnect, so a quick
-  blip is invisible; they report unavailable only after a genuine outage
+- Entities hold their last reading for 3 hours across a reconnect, so
+  wifi roaming between access points (which can drop the link for several
+  minutes at a time) stays invisible; they report unavailable only after a
+  genuine multi-hour outage
 - The "Connected" binary sensor always reports the raw link state
 
 ## Changelog

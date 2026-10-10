@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.3] - 2026-10-10
+
+Extends the availability grace period from 90s to 3 hours.
+
+- A spa whose wifi roams between access points can stay dropped for
+  several minutes at a time (observed up to ~12 min in HA logbook), which
+  exceeded the old 90s grace and flipped entities unavailable repeatedly
+  throughout the day even though the integration was reconnecting fine.
+- `AVAILABILITY_GRACE` raised to 3 hours so entities hold their last
+  reading through routine wifi flakiness and only report unavailable
+  after a genuine multi-hour outage. README troubleshooting section
+  updated to match.
+
 ## [1.2.2] - 2026-10-07
 
 Lowers log severity for expected, non-actionable connection failures caused
