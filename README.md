@@ -119,14 +119,17 @@ This integration uses the BlueFalls/Yoctub protocol:
   the normal backoff instead of every few seconds
 
 ### Switch Press Seems Ignored
-- Each command is confirmed against the spa's next status report. If the
-  spa goes silent after a command, the integration reconnects within about
-  10 seconds and re-sends it (within a 60 second window). A press made while
-  disconnected is queued the same way
-- If the spa answers but doesn't make the change (e.g. a pump locked out
-  while heating), the log says "Spa did not apply ..." and it is not retried
-- Enable debug logging on the integration to see every command sent and
-  confirmed
+- The spa treats commands as button presses (the value sent is ignored):
+  lights and pumps 2/3 toggle, pump 1 steps OFF -> LOW -> HIGH -> OFF. The
+  integration presses as many times as needed to reach the state you asked
+  for, checking the spa's reported state between presses, and does nothing
+  if the device is already there
+- If the spa goes silent after a press, the integration reconnects within
+  about 10 seconds and continues from the state the spa reports then
+- If a press changes nothing (e.g. equipment not fitted, or locked out
+  while heating), the log says "Spa did not respond to ..." and it is not
+  retried
+- Enable debug logging on the integration to see every request and press
 
 ## Changelog
 

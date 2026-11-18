@@ -5,6 +5,31 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.6] - 2026-11-17
+
+Commands are button presses, not "set to" values. A debug log of 1.2.5
+showed the spa ignoring the command value and stepping the device instead:
+`SET_PUMP1=0` sent while pump 1 was LOW turned it HIGH, a second one turned
+it OFF; `SET_PUMP1=2` from OFF gave LOW. Lights and pumps 2/3 toggle the
+same way. Any press computed from a wrong or stale state toggled the wrong
+way, which is why switches "sometimes" didn't work, and 1.2.5's re-send
+after a reconnect could undo a press that had already landed.
+
+- Requests now drive a device to the requested state one press at a time:
+  press, wait for the result to settle (4s), re-read the state, press again
+  if needed (pump 1 OFF->HIGH takes two presses). Nothing is sent if the
+  device is already in the requested state.
+- Presses are only computed from a state reported within the last 5s;
+  otherwise status is requested first.
+- After a stall-triggered reconnect, interrupted requests continue from the
+  state the spa reports then, so a press that landed is never repeated.
+- A press that changes nothing (after settling, with status flowing) is
+  reported as "Spa did not respond to ..." and not retried; at most 3
+  presses per request, abandoned after 60s.
+- CONFIG and INFO frames are now logged at DEBUG (decoded fields and raw
+  hex), to map which equipment the spa reports as installed so entities
+  for missing equipment can be skipped later.
+
 ## [1.2.5] - 2026-11-17
 
 Makes switch presses reliable across the spa's silent spells. A debug log
