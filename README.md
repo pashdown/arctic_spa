@@ -118,6 +118,16 @@ This integration uses the BlueFalls/Yoctub protocol:
   after a wifi roam, while it still holds the old session) is retried with
   the normal backoff instead of every few seconds
 
+### Switch Press Seems Ignored
+- Each command is confirmed against the spa's next status report. If the
+  spa goes silent after a command, the integration reconnects within about
+  10 seconds and re-sends it (within a 60 second window). A press made while
+  disconnected is queued the same way
+- If the spa answers but doesn't make the change (e.g. a pump locked out
+  while heating), the log says "Spa did not apply ..." and it is not retried
+- Enable debug logging on the integration to see every command sent and
+  confirmed
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).

@@ -5,6 +5,29 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.5] - 2026-11-17
+
+Makes switch presses reliable across the spa's silent spells. A debug log
+showed the spa going quiet for ~80s right after a burst of switch presses;
+presses in that window looked like they did nothing (HA never got a status
+update) or were rejected outright as "Not connected".
+
+- Commands are tracked until a LIVE frame shows them applied. A status
+  request is sent right after each command so confirmation arrives quickly.
+- Stall detection: if no status at all arrives within 10s of a command, the
+  session is dropped and reconnected immediately instead of waiting ~80s for
+  the read timeouts. If the spa answers but the change is missing, it is
+  asked once more; a fresh answer still without the change means the spa
+  declined the command, which is logged and not retried.
+- Unconfirmed commands are re-sent once the link is back, within a 60s
+  window so an old press can't override later changes made at the spa
+  panel. Commands are absolute (lights on, pump high), so a re-send of one
+  that did land is harmless.
+- A press while the link is down is queued for the reconnect instead of
+  being dropped with an ERROR.
+- Every command, confirmation, re-send and give-up is logged (DEBUG for the
+  normal path, WARNING otherwise).
+
 ## [1.2.4] - 2026-11-17
 
 Fixes stale "Connected" sessions, wrong readings for several sensors, and

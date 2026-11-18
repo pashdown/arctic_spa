@@ -54,6 +54,16 @@ LIVE_STALE_TIMEOUT = 3 * KEEPALIVE_INTERVAL + 5
 # Beyond this (a reconnect, an outage) the spa's state during the gap is
 # unknown, so the gap is skipped rather than guessed at.
 MAX_ENERGY_GAP = 5 * 60.0
+# After a command, the spa normally pushes a LIVE frame showing the change
+# within about a second. If no LIVE frame at all arrives within this long,
+# the session has stalled (seen in the field right after bursts of switch
+# presses): drop it and reconnect now instead of waiting for the read
+# timeouts (~80s), during which every further command is lost.
+COMMAND_ACK_TIMEOUT = 10.0
+# Commands that were never confirmed are re-sent after a reconnect, but only
+# within this window, so a stale press can't override later changes made at
+# the spa's own panel.
+COMMAND_RESEND_WINDOW = 60.0
 
 
 @dataclass
@@ -224,6 +234,36 @@ class SpaStatus:
         self._last_power_watts = self.estimated_power_watts
 
 
+# How to tell from a LIVE frame that a command took effect. Command values
+# are absolute (set lights=1, pump=HIGH), not toggles, so re-sending an
+# unconfirmed command is safe. Commands not listed are sent unverified.
+_COMMAND_CHECKS: dict[int, Callable[[SpaStatus, int], bool]] = {
+    CmdField.SET_TEMP: lambda s, v: s.setpoint_f == v,
+    CmdField.SET_PUMP1: lambda s, v: s.pump1 == v,
+    CmdField.SET_PUMP2: lambda s, v: s.pump2 == v,
+    CmdField.SET_PUMP3: lambda s, v: s.pump3 == v,
+    CmdField.SET_PUMP4: lambda s, v: s.pump4 == v,
+    CmdField.SET_PUMP5: lambda s, v: s.pump5 == v,
+    CmdField.SET_BLOWER1: lambda s, v: s.blower1 == v,
+    CmdField.SET_BLOWER2: lambda s, v: s.blower2 == v,
+    CmdField.SET_LIGHTS: lambda s, v: s.lights == bool(v),
+    CmdField.SET_ONZEN: lambda s, v: s.onzen == bool(v),
+    CmdField.SET_OZONE: lambda s, v: s.ozone == bool(v),
+    CmdField.SET_SDS: lambda s, v: s.sds == bool(v),
+    CmdField.SPABOY_BOOST: lambda s, v: s.filter_boost_active == bool(v),
+}
+
+
+@dataclass
+class _PendingCommand:
+    """A verifiable command not yet confirmed by a LIVE frame."""
+
+    payload: bytes
+    value: int
+    first_sent: float  # monotonic; bounds COMMAND_RESEND_WINDOW
+    last_sent: float = 0.0  # monotonic; identifies the current watchdog
+
+
 class ArcticSpaClient:
     """Client for communicating with Arctic Spa with persistent connection."""
 
@@ -247,6 +287,9 @@ class ArcticSpaClient:
         # Once a SpaBoy (ONZEN_LIVE) frame has been seen it is the only source
         # for pH/ORP, so the LIVE frame's fields can't fight it.
         self._onzen_seen = False
+        # Verifiable commands awaiting confirmation, keyed by CmdField.
+        self._pending: dict[int, _PendingCommand] = {}
+        self._watchdogs: set[asyncio.Task] = set()
 
     @property
     def status(self) -> SpaStatus:
@@ -364,8 +407,11 @@ class ArcticSpaClient:
     async def async_stop(self) -> None:
         """Stop the client and disconnect."""
         self._running = False
-        
+
         # Cancel background tasks
+        for task in list(self._watchdogs):
+            task.cancel()
+        self._watchdogs.clear()
         if self._keepalive_task:
             self._keepalive_task.cancel()
             try:
@@ -458,6 +504,8 @@ class ArcticSpaClient:
 
                 # Don't lose the probed frame - feed it to the parser.
                 await self._ingest(probe)
+
+                await self._resend_pending()
 
                 self._notify_state_change()
                 return True
@@ -654,6 +702,7 @@ class ArcticSpaClient:
         if pkt_type == MsgType.LIVE and payload:
             self._parse_live_data(payload)
             self._last_live = time.monotonic()
+            self._confirm_pending()
             self._notify_state_change()
         elif pkt_type == MsgType.ONZEN_LIVE and payload:
             self._parse_onzen_live_data(payload)
@@ -825,14 +874,140 @@ class ArcticSpaClient:
             self._mark_disconnected()
             return False
 
+    def _command_name(self, field_num: int) -> str:
+        """Readable name for a command field, for logs."""
+        try:
+            return CmdField(field_num).name
+        except ValueError:
+            return f"FIELD_{field_num}"
+
     async def async_send_command(self, payload: bytes) -> bool:
-        """Send a command to the spa."""
+        """Send a command to the spa.
+
+        Verifiable commands (see _COMMAND_CHECKS) are tracked until a LIVE
+        frame shows them applied. If the spa goes quiet after one, the link
+        is dropped early and the command re-sent once reconnected; a press
+        made while the link is down is queued the same way. Returns False
+        only for an unverifiable command that could not be sent.
+        """
+        fields = list(self._iter_varint_fields(payload))
+        if not fields:
+            return False
+        field_num, value = fields[0]
+        name = self._command_name(field_num)
+        verifiable = field_num in _COMMAND_CHECKS
+        now = time.monotonic()
+        if verifiable:
+            # A new press supersedes any earlier unconfirmed one.
+            self._pending[field_num] = _PendingCommand(payload, value, now)
+
         async with self._lock:
-            if not self._status.connected:
-                _LOGGER.error("Not connected to spa")
+            if not self._status.connected or self._writer is None:
+                if verifiable:
+                    _LOGGER.warning(
+                        "Spa not connected; %s=%d queued until reconnect",
+                        name, value,
+                    )
+                    return True
+                _LOGGER.warning(
+                    "Spa not connected; %s=%d dropped", name, value
+                )
                 return False
-            
-            return await self._send_packet(MsgType.COMMAND, payload)
+
+            _LOGGER.debug("Sending command %s=%d", name, value)
+            sent = await self._send_packet(MsgType.COMMAND, payload)
+            if sent:
+                # Ask for status right away so the confirmation (or its
+                # absence) shows up quickly.
+                await self._send_packet(MsgType.LIVE)
+
+        if not sent:
+            if verifiable:
+                _LOGGER.warning(
+                    "Sending %s=%d failed; queued until reconnect", name, value
+                )
+                return True
+            return False
+
+        if verifiable:
+            self._arm_watchdog(field_num, now)
+        return True
+
+    def _arm_watchdog(self, field_num: int, sent_at: float) -> None:
+        """Start the post-command stall check for one send."""
+        pending = self._pending.get(field_num)
+        if pending is None:
+            return
+        pending.last_sent = sent_at
+        task = asyncio.create_task(self._command_watchdog(field_num, sent_at))
+        self._watchdogs.add(task)
+        task.add_done_callback(self._watchdogs.discard)
+
+    async def _command_watchdog(self, field_num: int, sent_at: float) -> None:
+        """Drop a session that stopped delivering status after a command."""
+        await asyncio.sleep(COMMAND_ACK_TIMEOUT)
+        pending = self._pending.get(field_num)
+        if pending is None or pending.last_sent != sent_at:
+            return  # confirmed, or superseded by a later send
+        name = self._command_name(field_num)
+        if self._last_live > sent_at:
+            # The spa answered after the command but the change isn't there.
+            # Either it declined the command, or it answered once and then
+            # stalled. Ask again: a fresh answer means declined.
+            probe_at = time.monotonic()
+            async with self._lock:
+                await self._send_packet(MsgType.LIVE)
+            await asyncio.sleep(COMMAND_ACK_TIMEOUT)
+            pending = self._pending.get(field_num)
+            if pending is None or pending.last_sent != sent_at:
+                return
+            if self._last_live > probe_at:
+                # Status is flowing but doesn't show the change: the spa got
+                # the command and declined it (e.g. a pump locked out).
+                _LOGGER.warning(
+                    "Spa did not apply %s=%d; giving up on it",
+                    name, pending.value,
+                )
+                self._pending.pop(field_num, None)
+                return
+        writer = self._writer
+        if self._status.connected and writer is not None:
+            _LOGGER.warning(
+                "No status from spa within %ds of %s=%d; reconnecting",
+                int(COMMAND_ACK_TIMEOUT), name, pending.value,
+            )
+            # Abort rather than close: no point flushing to a stalled peer.
+            # The receive loop sees EOF and the supervisor reconnects, after
+            # which _resend_pending() delivers the command.
+            writer.transport.abort()
+
+    def _confirm_pending(self) -> None:
+        """Clear pending commands that the latest LIVE frame shows applied."""
+        for field_num, pending in list(self._pending.items()):
+            if _COMMAND_CHECKS[field_num](self._status, pending.value):
+                _LOGGER.debug(
+                    "Spa confirmed %s=%d",
+                    self._command_name(field_num), pending.value,
+                )
+                del self._pending[field_num]
+
+    async def _resend_pending(self) -> None:
+        """Re-send unconfirmed commands after a reconnect. Caller holds lock."""
+        now = time.monotonic()
+        for field_num, pending in list(self._pending.items()):
+            name = self._command_name(field_num)
+            if now - pending.first_sent > COMMAND_RESEND_WINDOW:
+                _LOGGER.warning(
+                    "Dropping %s=%d: not confirmed within %ds",
+                    name, pending.value, int(COMMAND_RESEND_WINDOW),
+                )
+                del self._pending[field_num]
+                continue
+            _LOGGER.info("Re-sending %s=%d after reconnect", name, pending.value)
+            if await self._send_packet(MsgType.COMMAND, pending.payload):
+                self._arm_watchdog(field_num, now)
+        if self._pending:
+            await self._send_packet(MsgType.LIVE)
 
     def _make_toggle_command(self, field_num: int, value: int) -> bytes:
         """Create a toggle command with stereo suffix."""
