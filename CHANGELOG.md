@@ -5,6 +5,45 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.4] - 2026-11-17
+
+Fixes stale "Connected" sessions, wrong readings for several sensors, and
+phantom energy, found while chasing a spa that showed "Connected" with
+stale readings and unresponsive switches.
+
+- Stale-session watchdog: the link now counts as up only while LIVE status
+  frames keep arriving. If none is parsed for `LIVE_STALE_TIMEOUT` (95s,
+  three missed keepalive answers) the session is dropped and reconnected,
+  even if other bytes are still trickling in. Previously any received byte
+  reset the dead-link check, so a session that stopped delivering status
+  stayed "Connected" indefinitely with every reading stale.
+- Protobuf parsing: field keys are now decoded as varints. Fields 16 and up
+  (ozone, economy, all-on, error, alarm, SDS, YESS) have two-byte keys and
+  were mis-decoded (always read as 1), after which the rest of the frame was
+  silently dropped. Non-varint fields are now skipped by wire type instead of
+  ending the parse. Error/alarm codes that were previously hidden may now
+  show up. pH/ORP from the LIVE frame are ignored once a SpaBoy frame has
+  been seen, so the two sources can't fight.
+- Connect handshake: the connected flag, availability grace clock and
+  backoff counter are committed only after the spa answers the probe.
+  Before, a spa that accepted TCP but stayed mute (typical right after a
+  wifi roam) reset the backoff to 5s on every attempt (field logs showed
+  ~16s retry loops for 45 minutes) and restarted the grace clock, so stale
+  entities never aged out. A send failure during setup now aborts the
+  attempt immediately.
+- Energy: each interval is billed at the power drawn during it (previous
+  state) rather than the newly arrived state, and gaps over 5 minutes
+  (reconnects, outages) are skipped. Previously a reconnect after an outage
+  billed the whole outage at the current power, e.g. ~19.5 kWh for 3 hours
+  with the heater on. Uses a monotonic clock.
+- Config flow: the validation client is always stopped. A failed setup
+  attempt used to leave its reconnect supervisor running in the background
+  forever, competing for the spa's single TCP slot.
+- Logging: a single missed keepalive answer is now DEBUG (it recovers on
+  its own and produced hundreds of warnings a day); connection resets in the
+  listener and on send are WARNING instead of ERROR.
+- Removed accidentally committed `__pycache__` files; added `.gitignore`.
+
 ## [1.2.3] - 2026-10-10
 
 Extends the availability grace period from 90s to 3 hours.

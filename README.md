@@ -109,6 +109,15 @@ This integration uses the BlueFalls/Yoctub protocol:
   genuine multi-hour outage
 - The "Connected" binary sensor always reports the raw link state
 
+### Connected but Readings Stale
+- The link is only considered up while the spa keeps delivering status
+  updates. If no status frame arrives for about 95 seconds, even though the
+  TCP session is still open, the integration drops the session and
+  reconnects, and "Connected" turns off
+- A spa that accepts the TCP connection but never answers (common right
+  after a wifi roam, while it still holds the old session) is retried with
+  the normal backoff instead of every few seconds
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).

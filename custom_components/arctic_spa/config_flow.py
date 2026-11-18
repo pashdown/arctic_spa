@@ -1,6 +1,7 @@
 """Config flow for Arctic Spa integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -28,26 +29,29 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect."""
     client = ArcticSpaClient(data[CONF_HOST])
-    
+
     try:
         if not await client.async_start():
             raise CannotConnect
-        
+
         # Give it a moment to receive initial data
-        import asyncio
         await asyncio.sleep(2)
-        
+
         # Check if we got data
         if not client.status.last_update:
             raise CannotConnect
-            
-        await client.async_stop()
-        
+
     except CannotConnect:
         raise
     except Exception as err:
         _LOGGER.error("Error validating spa connection: %s", err)
         raise CannotConnect from err
+    finally:
+        # async_start() launches the reconnect supervisor even when the first
+        # connect fails. Always stop it, or a failed setup attempt leaves a
+        # background task retrying the spa forever (and the spa only allows
+        # one TCP client at a time).
+        await client.async_stop()
 
     return {"title": f"Arctic Spa ({data[CONF_HOST]})"}
 

@@ -44,6 +44,16 @@ AVAILABILITY_GRACE = 3 * 3600.0  # 3 hours
 # KEEPALIVE_INTERVAL seconds, so staying silent this long means the spa has
 # stopped answering, not just a slow response.
 MAX_CONSECUTIVE_READ_TIMEOUTS = 2
+# Treat the link as dead if no LIVE status frame has been parsed for this long,
+# even if other bytes keep arriving. The keepalive asks for LIVE every
+# KEEPALIVE_INTERVAL seconds, so this is three missed answers in a row.
+# Without this, a session that still trickles some bytes but no longer
+# delivers status looks "connected" forever while every reading goes stale.
+LIVE_STALE_TIMEOUT = 3 * KEEPALIVE_INTERVAL + 5
+# Longest gap between two status updates that energy is integrated across.
+# Beyond this (a reconnect, an outage) the spa's state during the gap is
+# unknown, so the gap is skipped rather than guessed at.
+MAX_ENERGY_GAP = 5 * 60.0
 
 
 @dataclass
@@ -79,7 +89,9 @@ class SpaStatus:
     
     # Energy tracking
     energy_kwh: float = 0.0
-    _last_energy_update: datetime | None = None
+    # Monotonic time and estimated power as of the previous status update.
+    _last_energy_update: float | None = None
+    _last_power_watts: int = 0
 
     # Error code descriptions (from Arctic Spas documentation)
     ERROR_CODES = {
@@ -190,17 +202,26 @@ class SpaStatus:
         return power
 
     def update_energy(self) -> None:
-        """Update cumulative energy based on current power and elapsed time."""
-        now = datetime.now()
-        
+        """Accumulate energy for the interval since the previous status update.
+
+        Call after applying a new status. The interval is billed at the power
+        the spa was drawing during it, i.e. the previous update's estimate,
+        not the state that just arrived. Gaps longer than MAX_ENERGY_GAP
+        (reconnects, outages) are skipped: the spa's state across them is
+        unknown, and billing them at the new state's power invented kWh.
+        """
+        now = time.monotonic()
+
         if self._last_energy_update is not None:
-            # Calculate time elapsed in hours
-            elapsed_hours = (now - self._last_energy_update).total_seconds() / 3600.0
-            # Add energy: kWh = kW * hours
-            power_kw = self.estimated_power_watts / 1000.0
-            self.energy_kwh += power_kw * elapsed_hours
-        
+            elapsed = now - self._last_energy_update
+            if 0 < elapsed <= MAX_ENERGY_GAP:
+                # kWh = kW * hours
+                self.energy_kwh += (
+                    self._last_power_watts / 1000.0 * elapsed / 3600.0
+                )
+
         self._last_energy_update = now
+        self._last_power_watts = self.estimated_power_watts
 
 
 class ArcticSpaClient:
@@ -221,6 +242,11 @@ class ArcticSpaClient:
         self._disconnected_since: float | None = None
         self._rx_buffer = b''
         self._state_callbacks: list[Callable[[], None]] = []
+        # Monotonic time of the last parsed LIVE frame, for LIVE_STALE_TIMEOUT.
+        self._last_live = 0.0
+        # Once a SpaBoy (ONZEN_LIVE) frame has been seen it is the only source
+        # for pH/ORP, so the LIVE frame's fields can't fight it.
+        self._onzen_seen = False
 
     @property
     def status(self) -> SpaStatus:
@@ -373,26 +399,36 @@ class ArcticSpaClient:
                     timeout=CONNECT_TIMEOUT
                 )
                 
-                self._status.connected = True
-                self._disconnected_since = None
-                self._reconnect_attempt = 0
                 self._rx_buffer = b''
-                _LOGGER.info("Connected to spa")
+                _LOGGER.info("TCP connected to spa, waiting for a response")
 
-                # Send initial requests to get state
-                await self._send_packet(MsgType.INFO)
-                await asyncio.sleep(0.1)
-                await self._send_packet(MsgType.LIVE)
-                await asyncio.sleep(0.1)
-                await self._send_packet(MsgType.CONFIG)
-                await asyncio.sleep(0.1)
-                await self._send_packet(MsgType.ONZEN_LIVE)  # Request SpaBoy data
+                # Send initial requests to get state. A failed send means the
+                # spa reset the fresh socket (seen in the field right after a
+                # wifi roam) - no point waiting for a probe answer.
+                for i, msg_type in enumerate((
+                    MsgType.INFO,
+                    MsgType.LIVE,
+                    MsgType.CONFIG,
+                    MsgType.ONZEN_LIVE,  # Request SpaBoy data
+                )):
+                    if i:
+                        await asyncio.sleep(0.1)
+                    if not await self._send_packet(msg_type):
+                        _LOGGER.warning(
+                            "Spa at %s:%d dropped the connection during "
+                            "setup; will retry",
+                            self.host, self.port,
+                        )
+                        await self._teardown_socket()
+                        return False
 
                 # Confirm the spa actually talks on this port. A TCP handshake
                 # can succeed against a port that then stays mute (spa asleep,
-                # wrong host, firewall). Require at least one frame before
-                # declaring the link up, so the supervisor retries instead of
-                # sitting "connected" with no data.
+                # wrong host, firewall, or the spa still holding a stale
+                # session from before a wifi roam). Require at least one frame
+                # before declaring the link up. Nothing is committed (connected
+                # flag, grace clock, backoff counter) until then, so a mute
+                # spa backs off properly and entities still age out.
                 try:
                     probe = await asyncio.wait_for(
                         self._reader.read(4096), timeout=CONNECT_TIMEOUT
@@ -411,6 +447,14 @@ class ArcticSpaClient:
                     )
                     await self._teardown_socket()
                     return False
+
+                # The spa answered: only now is the link really up.
+                self._status.connected = True
+                self._disconnected_since = None
+                self._reconnect_attempt = 0
+                # Give the first LIVE frame a full stale window to arrive.
+                self._last_live = time.monotonic()
+                _LOGGER.info("Connected to spa")
 
                 # Don't lose the probed frame - feed it to the parser.
                 await self._ingest(probe)
@@ -475,6 +519,9 @@ class ArcticSpaClient:
                 await self._receive_loop()
             except asyncio.CancelledError:
                 break
+            except OSError as err:
+                # Connection reset by peer etc. - routine on a roaming spa.
+                _LOGGER.warning("Link to spa lost (%s); will reconnect", err)
             except Exception as err:
                 _LOGGER.error("Error in listener loop: %s", err)
 
@@ -554,16 +601,29 @@ class ArcticSpaClient:
                         consecutive_timeouts,
                     )
                     return
-                _LOGGER.warning("Read timeout, checking connection")
-                continue
+                # A single missed keepalive answer is routine for this spa
+                # (hundreds per day in field logs) and recovers on its own;
+                # only the dead-link decision above is worth a warning.
+                _LOGGER.debug("Read timeout, waiting for next keepalive answer")
+            else:
+                consecutive_timeouts = 0
 
-            consecutive_timeouts = 0
+                if not data:
+                    _LOGGER.warning("Connection closed by spa")
+                    return
 
-            if not data:
-                _LOGGER.warning("Connection closed by spa")
+                await self._ingest(data)
+
+            # Bytes arriving is not enough: the link is only useful while it
+            # delivers LIVE status. Otherwise "Connected" stays on while every
+            # reading is stale and commands go nowhere.
+            stale = time.monotonic() - self._last_live
+            if stale > LIVE_STALE_TIMEOUT:
+                _LOGGER.warning(
+                    "No status update from spa for %ds, treating link as dead",
+                    int(stale),
+                )
                 return
-
-            await self._ingest(data)
 
     async def _keepalive_loop(self) -> None:
         """Background task that sends keepalive requests."""
@@ -593,6 +653,7 @@ class ArcticSpaClient:
         
         if pkt_type == MsgType.LIVE and payload:
             self._parse_live_data(payload)
+            self._last_live = time.monotonic()
             self._notify_state_change()
         elif pkt_type == MsgType.ONZEN_LIVE and payload:
             self._parse_onzen_live_data(payload)
@@ -617,7 +678,10 @@ class ArcticSpaClient:
         return self._encode_varint(tag) + self._encode_varint(value)
 
     def _decode_varint(self, data: bytes, offset: int) -> tuple[int, int]:
-        """Decode a varint from data at offset."""
+        """Decode a varint from data at offset.
+
+        Raises ValueError if the data ends mid-varint.
+        """
         value = 0
         shift = 0
         while offset < len(data):
@@ -625,121 +689,124 @@ class ArcticSpaClient:
             offset += 1
             value |= (b & 0x7F) << shift
             if not (b & 0x80):
-                break
+                return value, offset
             shift += 7
-        return value, offset
+        raise ValueError("truncated varint")
+
+    def _iter_varint_fields(self, data: bytes):
+        """Yield (field_num, value) for each varint field in a protobuf message.
+
+        The field key (field_num << 3 | wire_type) is itself a varint, so
+        fields 16 and up take two bytes. Reading it as one byte (as before
+        1.2.4) mis-decoded every such field and then lost the rest of the
+        frame. Non-varint fields are skipped by their wire type rather than
+        ending the parse.
+        """
+        offset = 0
+        end = len(data)
+        try:
+            while offset < end:
+                key, offset = self._decode_varint(data, offset)
+                field_num = key >> 3
+                wire_type = key & 0x07
+                if wire_type == 0:  # varint
+                    value, offset = self._decode_varint(data, offset)
+                    yield field_num, value
+                elif wire_type == 1:  # 64-bit
+                    offset += 8
+                elif wire_type == 2:  # length-delimited
+                    length, offset = self._decode_varint(data, offset)
+                    offset += length
+                elif wire_type == 5:  # 32-bit
+                    offset += 4
+                else:
+                    _LOGGER.debug(
+                        "Unsupported wire type %d for field %d, stopping parse",
+                        wire_type, field_num,
+                    )
+                    return
+        except ValueError as err:
+            _LOGGER.debug("Truncated protobuf frame: %s", err)
 
     def _parse_live_data(self, data: bytes) -> None:
         """Parse live status protobuf data."""
-        offset = 0
-        while offset < len(data):
-            try:
-                tag = data[offset]
-                offset += 1
-                field_num = tag >> 3
-                wire_type = tag & 0x07
-                
-                if wire_type == 0:  # Varint
-                    value, offset = self._decode_varint(data, offset)
-                    
-                    if field_num == LiveField.TEMP:
-                        self._status.temperature_f = value
-                    elif field_num == LiveField.SETPOINT:
-                        self._status.setpoint_f = value
-                    elif field_num == LiveField.PUMP1:
-                        self._status.pump1 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.PUMP2:
-                        self._status.pump2 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.PUMP3:
-                        self._status.pump3 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.PUMP4:
-                        self._status.pump4 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.PUMP5:
-                        self._status.pump5 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.BLOWER1:
-                        self._status.blower1 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.BLOWER2:
-                        self._status.blower2 = PumpStatus(min(value, 2))
-                    elif field_num == LiveField.LIGHTS:
-                        self._status.lights = bool(value)
-                    elif field_num == LiveField.STEREO:
-                        self._status.stereo = bool(value)
-                    elif field_num == LiveField.HEATER1:
-                        self._status.heater1 = HeaterStatus(min(value, 3))
-                    elif field_num == LiveField.HEATER2:
-                        self._status.heater2 = HeaterStatus(min(value, 3))
-                    elif field_num == LiveField.FILTER:
-                        self._status.filter_status = FilterStatus(min(value, 7))
-                    elif field_num == LiveField.ONZEN:
-                        self._status.onzen = bool(value)
-                    elif field_num == LiveField.OZONE:
-                        self._status.ozone = bool(value)
-                    elif field_num == LiveField.ECONOMY:
-                        self._status.economy = bool(value)
-                    elif field_num == LiveField.ALL_ON:
-                        self._status.all_on = bool(value)
-                    elif field_num == LiveField.ERROR:
-                        self._status.error = value
-                    elif field_num == LiveField.ALARM:
-                        self._status.alarm = value
-                    elif field_num == LiveField.PH:
-                        self._status.ph = value
-                    elif field_num == LiveField.ORP:
-                        self._status.orp = value
-                    elif field_num == LiveField.SDS:
-                        self._status.sds = bool(value)
-                    elif field_num == LiveField.YESS:
-                        self._status.yess = bool(value)
-                else:
-                    break
-                    
-            except Exception as err:
-                _LOGGER.debug("Error parsing live data: %s", err)
-                break
-        
-        self._status.last_update = datetime.now()
-        self._status.update_energy()  # Update cumulative energy tracking
+        s = self._status
+        for field_num, value in self._iter_varint_fields(data):
+            if field_num == LiveField.TEMP:
+                s.temperature_f = value
+            elif field_num == LiveField.SETPOINT:
+                s.setpoint_f = value
+            elif field_num == LiveField.PUMP1:
+                s.pump1 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.PUMP2:
+                s.pump2 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.PUMP3:
+                s.pump3 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.PUMP4:
+                s.pump4 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.PUMP5:
+                s.pump5 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.BLOWER1:
+                s.blower1 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.BLOWER2:
+                s.blower2 = PumpStatus(min(value, 2))
+            elif field_num == LiveField.LIGHTS:
+                s.lights = bool(value)
+            elif field_num == LiveField.STEREO:
+                s.stereo = bool(value)
+            elif field_num == LiveField.HEATER1:
+                s.heater1 = HeaterStatus(min(value, 3))
+            elif field_num == LiveField.HEATER2:
+                s.heater2 = HeaterStatus(min(value, 3))
+            elif field_num == LiveField.FILTER:
+                s.filter_status = FilterStatus(min(value, 7))
+            elif field_num == LiveField.ONZEN:
+                s.onzen = bool(value)
+            elif field_num == LiveField.OZONE:
+                s.ozone = bool(value)
+            elif field_num == LiveField.ECONOMY:
+                s.economy = bool(value)
+            elif field_num == LiveField.ALL_ON:
+                s.all_on = bool(value)
+            elif field_num == LiveField.ERROR:
+                s.error = value
+            elif field_num == LiveField.ALARM:
+                s.alarm = value
+            elif field_num == LiveField.PH:
+                if not self._onzen_seen:
+                    s.ph = value
+            elif field_num == LiveField.ORP:
+                if not self._onzen_seen:
+                    s.orp = value
+            elif field_num == LiveField.SDS:
+                s.sds = bool(value)
+            elif field_num == LiveField.YESS:
+                s.yess = bool(value)
+
+        s.last_update = datetime.now()
+        s.update_energy()  # Update cumulative energy tracking
         _LOGGER.debug(
             "Status: temp=%d°F, setpoint=%d°F, lights=%s, pump1=%s, heater=%s",
-            self._status.temperature_f,
-            self._status.setpoint_f,
-            self._status.lights,
-            self._status.pump1.name,
-            self._status.heater1.name,
+            s.temperature_f,
+            s.setpoint_f,
+            s.lights,
+            s.pump1.name,
+            s.heater1.name,
         )
 
     def _parse_onzen_live_data(self, data: bytes) -> None:
         """Parse Onzen/SpaBoy live data (Type 48) for pH and ORP."""
-        offset = 0
-        while offset < len(data):
-            try:
-                tag = data[offset]
-                offset += 1
-                field_num = tag >> 3
-                wire_type = tag & 0x07
-                
-                if wire_type == 0:  # Varint
-                    value, offset = self._decode_varint(data, offset)
-                    
-                    # Field 2 = ORP (raw mV value)
-                    if field_num == 2:
-                        self._status.orp = value
-                        _LOGGER.debug("SpaBoy ORP: %d mV", value)
-                    # Field 3 = pH (divide by 100 for actual value)
-                    elif field_num == 3:
-                        self._status.ph = value
-                        _LOGGER.debug("SpaBoy pH raw: %d (%.2f)", value, value / 100.0)
-                        
-                elif wire_type == 2:  # Length-delimited (string/bytes)
-                    length, offset = self._decode_varint(data, offset)
-                    offset += length
-                else:
-                    # Skip unknown wire types
-                    break
-                    
-            except Exception as err:
-                _LOGGER.debug("Error parsing onzen live data: %s", err)
-                break
+        for field_num, value in self._iter_varint_fields(data):
+            # Field 2 = ORP (raw mV value)
+            if field_num == 2:
+                self._onzen_seen = True
+                self._status.orp = value
+                _LOGGER.debug("SpaBoy ORP: %d mV", value)
+            # Field 3 = pH (divide by 100 for actual value)
+            elif field_num == 3:
+                self._onzen_seen = True
+                self._status.ph = value
+                _LOGGER.debug("SpaBoy pH raw: %d (%.2f)", value, value / 100.0)
 
     async def _send_packet(self, msg_type: int, payload: bytes = b'') -> bool:
         """Send a packet (must be called with lock held or from single task)."""
@@ -752,7 +819,9 @@ class ArcticSpaClient:
             await self._writer.drain()
             return True
         except Exception as err:
-            _LOGGER.error("Error sending packet: %s", err)
+            # Typically ECONNRESET after a wifi roam; the supervisor
+            # reconnects, so this isn't error-level.
+            _LOGGER.warning("Error sending packet: %s", err)
             self._mark_disconnected()
             return False
 
