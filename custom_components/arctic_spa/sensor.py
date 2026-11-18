@@ -42,6 +42,7 @@ async def async_setup_entry(
         ArcticSpaOrpStatusSensor(coordinator, entry),
         ArcticSpaErrorSensor(coordinator, entry),
         ArcticSpaAlarmSensor(coordinator, entry),
+        ArcticSpaCurrentSensor(coordinator, entry),
         ArcticSpaPowerSensor(coordinator, entry),
         ArcticSpaEnergySensor(coordinator, entry),
     ]
@@ -356,8 +357,33 @@ class ArcticSpaAlarmSensor(ArcticSpaBaseSensor):
         return {}
 
 
+class ArcticSpaCurrentSensor(ArcticSpaBaseSensor):
+    """Measured current draw reported by the spa."""
+
+    _attr_icon = "mdi:current-ac"
+    _attr_native_unit_of_measurement = "A"
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(
+        self,
+        coordinator: ArcticSpaCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the current sensor."""
+        super().__init__(coordinator, entry, "Current", "current")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the measured current in amps."""
+        if self.coordinator.data:
+            return self.coordinator.data.current_a
+        return None
+
+
 class ArcticSpaPowerSensor(ArcticSpaBaseSensor):
-    """Estimated power consumption sensor for Arctic Spa."""
+    """Power draw: measured current x supply voltage, else an estimate."""
 
     _attr_icon = "mdi:lightning-bolt"
     _attr_native_unit_of_measurement = "W"
@@ -374,10 +400,21 @@ class ArcticSpaPowerSensor(ArcticSpaBaseSensor):
 
     @property
     def native_value(self) -> int | None:
-        """Return the estimated power consumption."""
+        """Return the power draw in watts."""
         if self.coordinator.data:
             return self.coordinator.data.estimated_power_watts
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Say whether the value is measured or estimated."""
+        if self.coordinator.data:
+            return {
+                "source": "measured"
+                if self.coordinator.data.measured_power
+                else "estimated"
+            }
+        return {}
 
 
 class ArcticSpaEnergySensor(CoordinatorEntity[ArcticSpaCoordinator], RestoreEntity, SensorEntity):

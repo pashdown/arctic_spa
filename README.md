@@ -47,6 +47,10 @@ In HACS, install by adding this repository and choosing the latest release.
   - Filter status
   - pH level (if equipped)
   - ORP/Chlorine level (if equipped)
+  - Current draw (A), measured by the spa
+  - Power (W): measured current x 240V when the spa reports current,
+    otherwise estimated from running loads (`source` attribute says which)
+  - Energy (kWh), accumulated from Power, for the Energy dashboard
 - **Binary Sensors**:
   - Heater active
   - Connection status

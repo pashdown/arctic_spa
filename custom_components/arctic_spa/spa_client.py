@@ -54,6 +54,10 @@ LIVE_STALE_TIMEOUT = 3 * KEEPALIVE_INTERVAL + 5
 # Beyond this (a reconnect, an outage) the spa's state during the gap is
 # unknown, so the gap is skipped rather than guessed at.
 MAX_ENERGY_GAP = 5 * 60.0
+# Supply voltage used to turn the spa's measured current into power. The
+# spa reports current only (LIVE field 23, amps x100); North American spas
+# run on 240V split phase.
+SUPPLY_VOLTAGE = 240
 # Spa commands behave like panel button presses, not "set to" values: the
 # spa ignores the value and steps the device (lights on<->off, pump 1
 # OFF->LOW->HIGH->OFF, pumps 2/3 OFF<->HIGH). Seen in field debug logs:
@@ -108,6 +112,10 @@ class SpaStatus:
     alarm: int = 0
     ph: int = 0
     orp: int = 0
+    # Measured total current draw (LIVE field 23 / 100). None until the spa
+    # reports it. Field captures: ~1.1A idle with pump 1 on low, 21.8A with
+    # all three pumps on high, ~47A briefly at pump start-up.
+    current_a: float | None = None
     connected: bool = False
     last_update: datetime | None = None
     
@@ -184,8 +192,23 @@ class SpaStatus:
         return self.alarm != 0
 
     @property
+    def measured_power(self) -> bool:
+        """Whether power comes from the spa's current reading."""
+        return self.current_a is not None
+
+    @property
     def estimated_power_watts(self) -> int:
-        """Estimate current power consumption in watts."""
+        """Power draw in watts.
+
+        Measured current x SUPPLY_VOLTAGE when the spa reports current;
+        otherwise a rough estimate from which loads are running.
+        """
+        if self.current_a is not None:
+            return round(self.current_a * SUPPLY_VOLTAGE)
+        return self._estimated_watts_from_loads()
+
+    def _estimated_watts_from_loads(self) -> int:
+        """Rough power estimate from pump/heater/blower states."""
         # Power constants (measured values)
         HEATER_HEATING_WATTS = 6500   # Full heating (includes Pump 1 Low)
         HEATER_WARMUP_WATTS = 350     # Heater warming up
@@ -869,6 +892,8 @@ class ArcticSpaClient:
                 s.ozone = bool(value)
             elif field_num == LiveField.ECONOMY:
                 s.economy = bool(value)
+            elif field_num == LiveField.CURRENT_ADC:
+                s.current_a = value / 100.0
             elif field_num == LiveField.ALL_ON:
                 s.all_on = bool(value)
             elif field_num == LiveField.ERROR:

@@ -5,6 +5,21 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.8] - 2026-11-17
+
+Real power readings. The spa reports its total current draw (LIVE field
+23, amps x100), found in packet captures: ~1.1A idle with pump 1 on low,
+21.8A with all three pumps on high, ~47A briefly at pump start-up.
+
+- New **Current** sensor (A).
+- **Power** is now measured current x 240V (`SUPPLY_VOLTAGE`) when the spa
+  reports current, instead of a guess from which pumps/heater are running.
+  Spas that don't report it keep the estimate. A `source` attribute says
+  `measured` or `estimated`.
+- **Energy** accumulates from Power as before, so it becomes measured too.
+  The existing total carries over; expect daily figures to shift from the
+  old estimates.
+
 ## [1.2.7] - 2026-11-17
 
 Matches the controls the Arctic Spa app offers, using packet captures of
