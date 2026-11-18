@@ -24,17 +24,21 @@ async def async_setup_entry(
     """Set up the Arctic Spa switches."""
     coordinator: ArcticSpaCoordinator = hass.data[DOMAIN][entry.entry_id]
     
-    entities = [
-        ArcticSpaLightsSwitch(coordinator, entry),
-        ArcticSpaBoostSwitch(coordinator, entry),
-        ArcticSpaOnzenSwitch(coordinator, entry),
+    has = coordinator.client.has_equipment
+    entities: list[SwitchEntity] = [
+        ArcticSpaEzSwitch(coordinator, entry),
         ArcticSpaSdsSwitch(coordinator, entry),
-        # Pump 2 and 3 - simple on/off (High only)
-        ArcticSpaPumpOnOffSwitch(coordinator, entry, 2),
-        ArcticSpaPumpOnOffSwitch(coordinator, entry, 3),
-        # Blower
-        ArcticSpaBlowerSwitch(coordinator, entry, 1),
     ]
+    if has("lights"):
+        entities.append(ArcticSpaLightsSwitch(coordinator, entry))
+    if has("onzen"):
+        entities.append(ArcticSpaOnzenSwitch(coordinator, entry))
+    # Pump 2 and 3 - simple on/off (High only)
+    for pump_num in (2, 3):
+        if has(f"pump{pump_num}"):
+            entities.append(ArcticSpaPumpOnOffSwitch(coordinator, entry, pump_num))
+    if has("blower1"):
+        entities.append(ArcticSpaBlowerSwitch(coordinator, entry, 1))
     
     async_add_entities(entities)
 
@@ -101,33 +105,39 @@ class ArcticSpaLightsSwitch(ArcticSpaBaseSwitch):
         await self.coordinator.async_set_lights(False)
 
 
-class ArcticSpaBoostSwitch(ArcticSpaBaseSwitch):
-    """Boost switch for Arctic Spa."""
+class ArcticSpaEzSwitch(ArcticSpaBaseSwitch):
+    """EZ mode (the app's EZ button): runs all pumps on high.
+
+    Sends the ALL_ON command and reads the LIVE frame's ALL_ON field, both
+    confirmed from packet captures of the Arctic Spa app. Turning it off
+    returns the pumps to their previous state. Replaces the "Spa Boost"
+    switch (SPABOY_BOOST), which had no effect on the spa it was tested on.
+    """
 
     _attr_icon = "mdi:rocket-launch"
 
     def __init__(
-        self, 
-        coordinator: ArcticSpaCoordinator, 
+        self,
+        coordinator: ArcticSpaCoordinator,
         entry: ConfigEntry,
     ) -> None:
-        """Initialize the boost switch."""
-        super().__init__(coordinator, entry, "Spa Boost", "boost")
+        """Initialize the EZ switch."""
+        super().__init__(coordinator, entry, "EZ Mode", "ez_mode")
 
     @property
     def is_on(self) -> bool | None:
-        """Return true if boost is active."""
+        """Return true if EZ mode is active."""
         if self.coordinator.data:
-            return self.coordinator.data.filter_boost_active
+            return self.coordinator.data.all_on
         return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on boost."""
-        await self.coordinator.async_set_filter_boost(True)
+        """Turn on EZ mode."""
+        await self.coordinator.async_set_all_on(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off boost."""
-        await self.coordinator.async_set_filter_boost(False)
+        """Turn off EZ mode."""
+        await self.coordinator.async_set_all_on(False)
 
 
 class ArcticSpaOnzenSwitch(ArcticSpaBaseSwitch):
@@ -163,6 +173,9 @@ class ArcticSpaSdsSwitch(ArcticSpaBaseSwitch):
     """SDS (bubbles) switch for Arctic Spa."""
 
     _attr_icon = "mdi:air-filter"
+    # The spa's CONFIG frame has no known field for SDS, and spas without
+    # it are common; start disabled, users who have it can enable it.
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self, 

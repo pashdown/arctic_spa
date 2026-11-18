@@ -30,8 +30,13 @@ In HACS, install by adding this repository and choosing the latest release.
 - **Pump Control**: Control pumps 1-3 (Off/Low/High)
 - **Blower Control**: Control blower (Off/Low/High)
 - **Lights**: Toggle spa lights on/off
-- **Spa Boost**: Enable/disable boost mode
-- **Onzen**: Enable/disable Onzen sanitization
+- **EZ Mode**: The app's EZ button: runs all pumps on high; turning it off
+  returns the pumps to their previous state
+- **SpaBoy Boost**: One-shot chlorine boost button (the spa ends it on its own)
+- **Onzen**: Enable/disable Onzen sanitization (only if the spa reports it)
+- **Installed equipment only**: entities for Pumps 2/3, Blower, Lights and
+  Onzen are created only if the spa reports that equipment. The SDS switch
+  starts disabled; enable it if your spa has SDS
 - **Resilient connection**: persistent link with automatic reconnect
   (exponential backoff) and a grace period that rides through brief drops so
   entities do not flap unavailable

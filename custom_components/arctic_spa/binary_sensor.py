@@ -30,11 +30,12 @@ async def async_setup_entry(
         ArcticSpaHeaterBinarySensor(coordinator, entry),
         ArcticSpaConnectedSensor(coordinator, entry),
         ArcticSpaBoostSensor(coordinator, entry),
-        ArcticSpaOnzenSensor(coordinator, entry),
         ArcticSpaEconomySensor(coordinator, entry),
         ArcticSpaErrorBinarySensor(coordinator, entry),
         ArcticSpaAlarmBinarySensor(coordinator, entry),
     ]
+    if coordinator.client.has_equipment("onzen"):
+        entities.append(ArcticSpaOnzenSensor(coordinator, entry))
     
     async_add_entities(entities)
 

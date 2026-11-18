@@ -1,6 +1,7 @@
 """The Arctic Spa integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -15,6 +16,7 @@ from .spa_client import ArcticSpaClient
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
+    Platform.BUTTON,
     Platform.CLIMATE,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
@@ -37,6 +39,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(
             f"Arctic Spa at {host}:{client.port} not responding; will retry"
         )
+
+    # The CONFIG frame (installed equipment) normally arrives within a
+    # moment of connecting; platforms use it to skip entities for missing
+    # equipment. If it doesn't come, every entity is created as before.
+    try:
+        await asyncio.wait_for(client.config_received.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        _LOGGER.debug("No CONFIG frame from spa; creating all entities")
 
     coordinator = ArcticSpaCoordinator(hass, client)
     

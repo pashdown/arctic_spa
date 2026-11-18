@@ -89,13 +89,17 @@ class ArcticSpaCoordinator(DataUpdateCoordinator[SpaStatus]):
         """Set temperature in Fahrenheit."""
         return await self.client.async_set_temperature(temp_f)
 
-    async def async_set_filter_boost(self, on: bool) -> bool:
-        """Set filter boost."""
-        return await self.client.async_set_filter_boost(on)
+    async def async_spaboy_boost(self) -> bool:
+        """Start a SpaBoy chlorine boost."""
+        return await self.client.async_spaboy_boost()
 
     async def async_set_onzen(self, on: bool) -> bool:
         """Set Onzen."""
         return await self.client.async_set_onzen(on)
+
+    async def async_set_all_on(self, on: bool) -> bool:
+        """Set EZ mode (all pumps high)."""
+        return await self.client.async_set_all_on(on)
 
     async def async_set_sds(self, on: bool) -> bool:
         """Set SDS (bubbles)."""

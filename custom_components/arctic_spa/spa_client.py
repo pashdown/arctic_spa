@@ -264,12 +264,24 @@ _COMMAND_STATE: dict[int, Callable[[SpaStatus], int]] = {
     CmdField.SET_ONZEN: lambda s: int(s.onzen),
     CmdField.SET_OZONE: lambda s: int(s.ozone),
     CmdField.SET_SDS: lambda s: int(s.sds),
-    CmdField.SPABOY_BOOST: lambda s: int(s.filter_boost_active),
 }
 # On/off devices: any non-zero request means "on".
+_COMMAND_STATE[CmdField.ALL_ON] = lambda s: int(s.all_on)
 _BOOLEAN_FIELDS = {
     CmdField.SET_LIGHTS, CmdField.SET_ONZEN, CmdField.SET_OZONE,
-    CmdField.SET_SDS, CmdField.SPABOY_BOOST,
+    CmdField.SET_SDS, CmdField.ALL_ON,
+}
+
+# CONFIG frame fields that say whether a piece of equipment is installed
+# (non-zero = present). Mapped from a spa with known hardware (3 pumps,
+# lights, no blower, no Onzen); the layout follows the LIVE frame's order
+# starting at pump 1. Equipment not listed here is always assumed present.
+CONFIG_EQUIPMENT = {
+    "pump2": 2,
+    "pump3": 3,
+    "blower1": 6,
+    "lights": 8,
+    "onzen": 13,
 }
 
 
@@ -314,6 +326,9 @@ class ArcticSpaClient:
         self._pending: dict[int, _PendingCommand] = {}
         self._watchdogs: set[asyncio.Task] = set()
         self._drive_scheduled = False
+        # Installed-equipment report from the spa's CONFIG frame.
+        self.config: dict[int, int] | None = None
+        self.config_received = asyncio.Event()
 
     @property
     def status(self) -> SpaStatus:
@@ -734,10 +749,9 @@ class ArcticSpaClient:
             self._schedule_drive()
             self._notify_state_change()
         elif pkt_type in (MsgType.CONFIG, MsgType.INFO) and payload:
-            # Not used yet. CONFIG appears to describe the installed
-            # equipment (pumps, blowers, Onzen...); logged so its layout can
-            # be mapped against a spa with known hardware, so entities for
-            # missing equipment can be skipped in a later release.
+            if pkt_type == MsgType.CONFIG:
+                self.config = dict(self._iter_varint_fields(payload))
+                self.config_received.set()
             _LOGGER.debug(
                 "%s fields: %s raw: %s",
                 type_name,
@@ -885,7 +899,11 @@ class ArcticSpaClient:
 
     def _parse_onzen_live_data(self, data: bytes) -> None:
         """Parse Onzen/SpaBoy live data (Type 48) for pH and ORP."""
-        for field_num, value in self._iter_varint_fields(data):
+        fields = list(self._iter_varint_fields(data))
+        # The other fields (boost state/timer among them?) aren't mapped
+        # yet; logged so they can be.
+        _LOGGER.debug("ONZEN_LIVE fields: %s", fields)
+        for field_num, value in fields:
             # Field 2 = ORP (raw mV value)
             if field_num == 2:
                 self._onzen_seen = True
@@ -1127,9 +1145,15 @@ class ArcticSpaClient:
         temp_f = round(temp_c * 9 / 5 + 32)
         return await self.async_set_temperature(temp_f)
 
-    async def async_set_filter_boost(self, on: bool) -> bool:
-        """Set filter/spa boost on/off."""
-        payload = self._make_toggle_command(CmdField.SPABOY_BOOST, 1 if on else 0)
+    async def async_spaboy_boost(self) -> bool:
+        """Start a SpaBoy chlorine boost (the app's Boost button).
+
+        One-shot: the spa runs the boost for its own fixed period and there
+        is no off command. Per packet captures of the Arctic Spa app this is
+        sent bare, without the SET_STEREO suffix other commands carry, and
+        no LIVE field changes, so it is sent unverified.
+        """
+        payload = self._encode_field(CmdField.SPABOY_BOOST, 1)
         return await self.async_send_command(payload)
 
     async def async_set_onzen(self, on: bool) -> bool:
@@ -1150,6 +1174,21 @@ class ArcticSpaClient:
     async def async_set_sds(self, on: bool) -> bool:
         """Set SDS (bubbles) on/off."""
         payload = self._make_toggle_command(CmdField.SET_SDS, 1 if on else 0)
+        return await self.async_send_command(payload)
+
+    def has_equipment(self, key: str) -> bool:
+        """Whether the spa reports a piece of equipment as installed.
+
+        True when unknown (no CONFIG frame seen, or no mapping), so spas
+        that don't report CONFIG keep every entity as before.
+        """
+        if self.config is None or key not in CONFIG_EQUIPMENT:
+            return True
+        return self.config.get(CONFIG_EQUIPMENT[key], 1) != 0
+
+    async def async_set_all_on(self, on: bool) -> bool:
+        """Set EZ mode (ALL_ON: all pumps high) on/off."""
+        payload = self._make_toggle_command(CmdField.ALL_ON, 1 if on else 0)
         return await self.async_send_command(payload)
 
     async def async_request_status(self) -> bool:

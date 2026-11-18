@@ -5,6 +5,31 @@ All notable changes to this project are documented here. Backfilled
 after the local working tree was found to be git-untracked with no prior
 changelog.
 
+## [1.2.7] - 2026-11-17
+
+Matches the controls the Arctic Spa app offers, using packet captures of
+the app talking to the spa.
+
+- New **EZ Mode** switch (the app's EZ button): sends `ALL_ON` (command
+  field 17) and reads the LIVE frame's `ALL_ON` field (24). Runs all pumps
+  on high; off returns them to their previous state.
+- **SpaBoy Boost** is now a button, not a switch: the app sends it as a
+  one-shot `SPABOY_BOOST` (field 19) with no off command, and without the
+  `SET_STEREO` suffix every other command carries (the old switch added
+  the suffix and judged success from the filter status, which never
+  changes). The old "Spa Boost" switch is removed.
+- Entities for missing equipment are no longer created. The spa's CONFIG
+  frame lists installed equipment (fields 2/3 pumps 2/3, 6 blower 1, 8
+  lights, 13 Onzen, mapped against a spa with known hardware). Setup waits
+  up to 5s for it; spas that don't send it keep every entity.
+- The SDS switch is created disabled by default (no CONFIG field for it is
+  known); enable it if your spa has SDS.
+- ONZEN_LIVE frames are logged in full at DEBUG to map the remaining
+  SpaBoy fields (boost timer and the like).
+- Entities removed by this release (old Spa Boost switch, and on spas that
+  lack them Blower 1 / Onzen) show as "no longer provided" in Home
+  Assistant and can be deleted from the entity settings.
+
 ## [1.2.6] - 2026-11-17
 
 Commands are button presses, not "set to" values. A debug log of 1.2.5
